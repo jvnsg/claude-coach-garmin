@@ -27,10 +27,10 @@ Where:
 
 ### Running TSS (rTSS)
 
-Estimated from pace and HR. Use Strava's suffer_score as a proxy:
+Estimated from pace and HR. The `suffer_score` column is reserved for future use; estimate rTSS from HR data:
 
-- suffer_score ≈ rTSS for most athletes
-- Compare suffer_score per hour across sessions to gauge relative intensity
+- A hard 1-hour run at threshold ≈ 100 rTSS
+- Compare average HR relative to threshold across sessions to gauge relative intensity
 
 ### Swim TSS (sTSS)
 

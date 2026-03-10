@@ -1,23 +1,12 @@
-import {
-  configExists,
-  loadConfig,
-  promptForConfig,
-  saveConfig,
-  saveTokens,
-  tokensExist,
-  getDbPath,
-  createConfig,
-  type Tokens,
-} from "./lib/config.js";
+import { configExists, loadConfig, saveConfig, getDbPath, createConfig } from "./lib/config.js";
 import { log } from "./lib/logging.js";
 import { migrate } from "./db/migrate.js";
 import { execute, initDatabase, query, queryJson } from "./db/client.js";
-import { getValidTokens } from "./strava/oauth.js";
-import { getAllActivities, getAthlete } from "./strava/api.js";
-import type { StravaActivity, StravaTokenResponse } from "./strava/types.js";
+import type { GarminActivity, GarminSocialProfile } from "./garmin/types.js";
 import { readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
+import { execSync } from "child_process";
 import { ProxyAgent, setGlobalDispatcher } from "undici";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -42,10 +31,7 @@ if (proxyUrl) {
 
 interface SyncArgs {
   command: "sync";
-  clientId?: string;
-  clientSecret?: string;
-  accessToken?: string;
-  refreshToken?: string;
+  tokenDir?: string;
   days?: number;
 }
 
@@ -61,35 +47,21 @@ interface QueryArgs {
   json: boolean;
 }
 
-interface AuthArgs {
-  command: "auth";
-  clientId?: string;
-  clientSecret?: string;
-  code?: string;
-}
-
 interface HelpArgs {
   command: "help";
 }
 
-type CliArgs = SyncArgs | RenderArgs | QueryArgs | AuthArgs | HelpArgs;
+type CliArgs = SyncArgs | RenderArgs | QueryArgs | HelpArgs;
 
 function parseArgs(): CliArgs {
   const args = process.argv.slice(2);
 
   if (args.length === 0 || args[0] === "sync") {
-    // Sync command (default)
     const syncArgs: SyncArgs = { command: "sync" };
 
     for (const arg of args) {
-      if (arg.startsWith("--client-id=")) {
-        syncArgs.clientId = arg.split("=")[1];
-      } else if (arg.startsWith("--client-secret=")) {
-        syncArgs.clientSecret = arg.split("=")[1];
-      } else if (arg.startsWith("--access-token=")) {
-        syncArgs.accessToken = arg.split("=")[1];
-      } else if (arg.startsWith("--refresh-token=")) {
-        syncArgs.refreshToken = arg.split("=")[1];
+      if (arg.startsWith("--token-dir=")) {
+        syncArgs.tokenDir = arg.slice("--token-dir=".length);
       } else if (arg.startsWith("--days=")) {
         syncArgs.days = parseInt(arg.split("=")[1]);
       }
@@ -136,22 +108,6 @@ function parseArgs(): CliArgs {
     return queryArgs;
   }
 
-  if (args[0] === "auth") {
-    const authArgs: AuthArgs = { command: "auth" };
-
-    for (const arg of args) {
-      if (arg.startsWith("--client-id=")) {
-        authArgs.clientId = arg.slice("--client-id=".length);
-      } else if (arg.startsWith("--client-secret=")) {
-        authArgs.clientSecret = arg.slice("--client-secret=".length);
-      } else if (arg.startsWith("--code=")) {
-        authArgs.code = arg.slice("--code=".length);
-      }
-    }
-
-    return authArgs;
-  }
-
   if (args[0] === "--help" || args[0] === "-h" || args[0] === "help") {
     return { command: "help" };
   }
@@ -167,26 +123,17 @@ Claude Coach - Training Plan Tools
 Usage: npx claude-coach <command> [options]
 
 Commands:
-  sync              Sync activities from Strava
-  auth              Get Strava authorization URL or exchange code for tokens
+  sync              Sync activities from Garmin Connect
   render <file>     Render a training plan JSON to HTML
   query <sql>       Run a SQL query against the database
   help              Show this help message
 
-Auth Options (for headless/Claude environments):
-  --client-id=ID        Strava API client ID
-  --client-secret=SEC   Strava API client secret
-  --code=URL_OR_CODE    Full redirect URL or just the authorization code
-
-  Step 1: Run 'auth' with credentials to get authorization URL
-  Step 2: User clicks URL, authorizes, copies entire redirect URL
-  Step 3: Run 'auth --code=URL' to exchange for tokens
-  Step 4: Run 'sync' to fetch activities
-
 Sync Options:
-  --client-id=ID        Strava API client ID (for OAuth flow)
-  --client-secret=SEC   Strava API client secret (for OAuth flow)
-  --days=N              Days of history to sync (default: 730)
+  --token-dir=PATH  Path to garth OAuth token directory (default: /mnt/project)
+  --days=N          Days of history to sync (default: 730)
+
+  Requires: Python 3 with garth installed (pip install garth)
+  Token files needed: oauth1_token.json and oauth2_token.json in token-dir
 
 Render Options:
   --output, -o FILE     Output HTML file (default: <input>.html)
@@ -195,14 +142,9 @@ Query Options:
   --json                Output as JSON (default: plain text)
 
 Examples:
-  # Headless auth flow (for Claude/automated environments)
-  npx claude-coach auth --client-id=12345 --client-secret=abc123
-  # User clicks URL, copies code from failed redirect
-  npx claude-coach auth --code=AUTHORIZATION_CODE
+  # Sync Garmin Connect activities
   npx claude-coach sync
-
-  # Interactive auth flow (opens browser)
-  npx claude-coach sync --client-id=12345 --client-secret=abc123
+  npx claude-coach sync --token-dir=/path/to/tokens --days=365
 
   # Render a training plan to HTML
   npx claude-coach render plan.json --output my-plan.html
@@ -210,103 +152,6 @@ Examples:
   # Query the database
   npx claude-coach query "SELECT * FROM weekly_volume LIMIT 5"
 `);
-}
-
-// ============================================================================
-// Auth Command (for headless/Claude environments)
-// ============================================================================
-
-const REDIRECT_PORT = 8765;
-const REDIRECT_URI = `http://localhost:${REDIRECT_PORT}/callback`;
-const AUTHORIZE_URL = "https://www.strava.com/oauth/authorize";
-const TOKEN_URL = "https://www.strava.com/oauth/token";
-
-async function runAuth(args: AuthArgs): Promise<void> {
-  // If code is provided, exchange it for tokens
-  if (args.code) {
-    if (!configExists()) {
-      log.error("No configuration found. Run 'auth' with --client-id and --client-secret first.");
-      process.exit(1);
-    }
-
-    // Extract code from full URL if user pasted the entire redirect URL
-    let code = args.code;
-    if (code.includes("localhost") || code.startsWith("http")) {
-      try {
-        const url = new URL(code);
-        const extractedCode = url.searchParams.get("code");
-        if (extractedCode) {
-          code = extractedCode;
-        } else {
-          log.error("Could not find 'code' parameter in URL");
-          process.exit(1);
-        }
-      } catch {
-        // Not a valid URL, use as-is
-      }
-    }
-
-    const config = loadConfig();
-    log.start("Exchanging authorization code for tokens...");
-
-    const tokenResponse = await fetch(TOKEN_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        client_id: config.strava.client_id,
-        client_secret: config.strava.client_secret,
-        code: code,
-        grant_type: "authorization_code",
-      }),
-    });
-
-    if (!tokenResponse.ok) {
-      const error = await tokenResponse.text();
-      log.error(`Token exchange failed: ${error}`);
-      process.exit(1);
-    }
-
-    const data: StravaTokenResponse = await tokenResponse.json();
-
-    const tokens: Tokens = {
-      access_token: data.access_token,
-      refresh_token: data.refresh_token,
-      expires_at: data.expires_at,
-      athlete_id: data.athlete.id,
-    };
-
-    saveTokens(tokens);
-    log.success(`Authenticated as ${data.athlete.firstname} ${data.athlete.lastname}`);
-    log.ready("Now run: npx claude-coach sync");
-    return;
-  }
-
-  // Otherwise, generate and print the authorization URL
-  if (!args.clientId || !args.clientSecret) {
-    log.error("Required: --client-id and --client-secret");
-    log.info("Get these from: https://www.strava.com/settings/api");
-    process.exit(1);
-  }
-
-  // Save config for later use
-  const config = createConfig(args.clientId, args.clientSecret, 730);
-  saveConfig(config);
-
-  const authUrl = new URL(AUTHORIZE_URL);
-  authUrl.searchParams.set("client_id", args.clientId);
-  authUrl.searchParams.set("response_type", "code");
-  authUrl.searchParams.set("redirect_uri", REDIRECT_URI);
-  authUrl.searchParams.set("scope", "activity:read_all");
-  authUrl.searchParams.set("approval_prompt", "auto");
-
-  console.log("\n📋 AUTHORIZATION URL:\n");
-  console.log(authUrl.toString());
-  console.log("\n📝 INSTRUCTIONS:");
-  console.log("1. Open the URL above in a browser");
-  console.log("2. Click 'Authorize' on Strava");
-  console.log("3. You'll be redirected to a page that won't load (that's OK!)");
-  console.log("4. Copy the ENTIRE URL from your browser's address bar");
-  console.log("5. Paste it back to Claude\n");
 }
 
 // ============================================================================
@@ -318,7 +163,62 @@ function escapeString(str: string | null | undefined): string {
   return `'${str.replace(/'/g, "''")}'`;
 }
 
-function insertActivity(activity: StravaActivity): void {
+function getSyncScriptPath(): string {
+  const locations = [
+    join(__dirname, "garmin", "sync.py"),
+    join(__dirname, "..", "src", "garmin", "sync.py"),
+    join(process.cwd(), "src", "garmin", "sync.py"),
+  ];
+
+  for (const loc of locations) {
+    try {
+      readFileSync(loc);
+      return loc;
+    } catch {
+      // Continue to next location
+    }
+  }
+
+  throw new Error("Could not find garmin/sync.py script");
+}
+
+function runPythonSync(
+  scriptPath: string,
+  tokenDir: string,
+  days: number,
+  command: string
+): string {
+  try {
+    const output = execSync(`python3 ${scriptPath} ${tokenDir} ${days} ${command}`, {
+      maxBuffer: 100 * 1024 * 1024, // 100MB buffer for large activity lists
+      stdio: ["pipe", "pipe", "inherit"], // inherit stderr so progress shows in terminal
+    });
+    return output.toString();
+  } catch (err: unknown) {
+    const error = err as { message?: string };
+    throw new Error(`Python sync failed: ${error.message ?? String(err)}`);
+  }
+}
+
+function insertActivity(activity: GarminActivity): void {
+  const sportType = activity.activityType?.typeKey ?? "other";
+
+  // Convert "YYYY-MM-DD HH:MM:SS" GMT to ISO 8601 with Z suffix
+  const startDate = activity.startTimeGMT ? activity.startTimeGMT.replace(" ", "T") + "Z" : null;
+
+  // Cadence field varies by sport type
+  const avgCadence =
+    activity.averageRunningCadenceInStepsPerMinute ??
+    activity.averageBikingCadenceInRevPerMinute ??
+    activity.averageSwimmingCadenceInStrokesPerMinute ??
+    null;
+
+  // Estimate kilojoules from average power * moving duration
+  const kilojoules =
+    activity.averagePower && activity.movingDuration
+      ? (activity.averagePower * activity.movingDuration) / 1000
+      : null;
+
   const sql = `
     INSERT OR REPLACE INTO activities (
       id, name, sport_type, start_date, elapsed_time, moving_time,
@@ -327,28 +227,28 @@ function insertActivity(activity: StravaActivity): void {
       weighted_average_watts, kilojoules, suffer_score, average_cadence,
       calories, description, workout_type, gear_id, raw_json, synced_at
     ) VALUES (
-      ${activity.id},
-      ${escapeString(activity.name)},
-      ${escapeString(activity.sport_type)},
-      ${escapeString(activity.start_date)},
-      ${activity.elapsed_time ?? "NULL"},
-      ${activity.moving_time ?? "NULL"},
+      ${activity.activityId},
+      ${escapeString(activity.activityName)},
+      ${escapeString(sportType)},
+      ${escapeString(startDate)},
+      ${activity.duration ?? "NULL"},
+      ${activity.movingDuration ?? "NULL"},
       ${activity.distance ?? "NULL"},
-      ${activity.total_elevation_gain ?? "NULL"},
-      ${activity.average_speed ?? "NULL"},
-      ${activity.max_speed ?? "NULL"},
-      ${activity.average_heartrate ?? "NULL"},
-      ${activity.max_heartrate ?? "NULL"},
-      ${activity.average_watts ?? "NULL"},
-      ${activity.max_watts ?? "NULL"},
-      ${activity.weighted_average_watts ?? "NULL"},
-      ${activity.kilojoules ?? "NULL"},
-      ${activity.suffer_score ?? "NULL"},
-      ${activity.average_cadence ?? "NULL"},
+      ${activity.elevationGain ?? "NULL"},
+      ${activity.averageSpeed ?? "NULL"},
+      ${activity.maxSpeed ?? "NULL"},
+      ${activity.averageHR ?? "NULL"},
+      ${activity.maxHR ?? "NULL"},
+      ${activity.averagePower ?? "NULL"},
+      ${activity.maxPower ?? "NULL"},
+      ${activity.normPower ?? "NULL"},
+      ${kilojoules ?? "NULL"},
+      NULL,
+      ${avgCadence ?? "NULL"},
       ${activity.calories ?? "NULL"},
       ${escapeString(activity.description)},
-      ${activity.workout_type ?? "NULL"},
-      ${escapeString(activity.gear_id)},
+      NULL,
+      NULL,
       ${escapeString(JSON.stringify(activity))},
       datetime('now')
     );
@@ -357,22 +257,23 @@ function insertActivity(activity: StravaActivity): void {
   execute(sql);
 }
 
-function insertAthlete(athlete: {
-  id: number;
-  firstname: string;
-  lastname: string;
-  weight?: number;
-  ftp?: number;
-}): void {
+function insertAthlete(profile: GarminSocialProfile): void {
+  const nameParts = (profile.fullName ?? profile.displayName ?? "").trim().split(/\s+/);
+  const firstname = nameParts[0] ?? "";
+  const lastname = nameParts.slice(1).join(" ");
+
+  // Garmin stores weight in grams; convert to kg
+  const weightKg = profile.weight ? profile.weight / 1000 : null;
+
   const sql = `
     INSERT OR REPLACE INTO athlete (id, firstname, lastname, weight, ftp, raw_json, updated_at)
     VALUES (
-      ${athlete.id},
-      ${escapeString(athlete.firstname)},
-      ${escapeString(athlete.lastname)},
-      ${athlete.weight ?? "NULL"},
-      ${athlete.ftp ?? "NULL"},
-      ${escapeString(JSON.stringify(athlete))},
+      ${profile.profileId},
+      ${escapeString(firstname)},
+      ${escapeString(lastname)},
+      ${weightKg ?? "NULL"},
+      NULL,
+      ${escapeString(JSON.stringify(profile))},
       datetime('now')
     );
   `;
@@ -380,114 +281,46 @@ function insertAthlete(athlete: {
 }
 
 async function runSync(args: SyncArgs): Promise<void> {
-  log.box("Claude Coach - Strava Sync");
+  log.box("Claude Coach - Garmin Connect Sync");
 
-  // Step 0: Initialize SQLite backend
   await initDatabase();
-
-  const syncDays = args.days || 730;
-
-  // Step 1: Handle token-based auth (no browser needed)
-  if (args.accessToken && args.refreshToken) {
-    log.info("Using provided access tokens...");
-
-    // Save tokens - we'll get athlete_id after fetching profile
-    // Set expiry to 1 hour from now (we have refresh token for renewal)
-    const tempTokens = {
-      access_token: args.accessToken,
-      refresh_token: args.refreshToken,
-      expires_at: Math.floor(Date.now() / 1000) + 3600,
-      athlete_id: 0, // Will be updated after fetching athlete
-    };
-    saveTokens(tempTokens);
-
-    // Create minimal config if needed
-    if (!configExists()) {
-      // Token-based auth doesn't need client credentials for initial sync
-      // but we need them for token refresh - use placeholders
-      const config = createConfig("token-auth", "token-auth", syncDays);
-      saveConfig(config);
-    }
-
-    // Initialize database
-    migrate();
-
-    // Fetch athlete to get ID and validate tokens
-    log.start("Validating tokens and fetching athlete profile...");
-    const athlete = await getAthlete(tempTokens);
-
-    // Update tokens with real athlete ID
-    const tokens = { ...tempTokens, athlete_id: athlete.id };
-    saveTokens(tokens);
-
-    insertAthlete(athlete);
-    log.success(`Authenticated as ${athlete.firstname} ${athlete.lastname}`);
-
-    // Fetch activities
-    const afterDate = new Date();
-    afterDate.setDate(afterDate.getDate() - syncDays);
-    const activities = await getAllActivities(tokens, afterDate);
-
-    // Store activities
-    log.start("Storing activities in database...");
-    let count = 0;
-    for (const activity of activities) {
-      insertActivity(activity);
-      count++;
-      if (count % 50 === 0) {
-        log.progress(`   Stored ${count}/${activities.length}...`);
-      }
-    }
-    log.progressEnd();
-    log.success(`Stored ${activities.length} activities`);
-
-    execute(`
-      INSERT INTO sync_log (started_at, completed_at, activities_synced, status)
-      VALUES (datetime('now'), datetime('now'), ${activities.length}, 'success');
-    `);
-
-    log.info(`Database: ${getDbPath()}`);
-    log.ready("Sync complete! You can now create training plans.");
-    return;
-  }
-
-  // Step 2: OAuth-based auth (requires browser)
-  if (!configExists()) {
-    if (args.clientId && args.clientSecret) {
-      log.info("Creating configuration from command line arguments...");
-      const config = createConfig(args.clientId, args.clientSecret, syncDays);
-      saveConfig(config);
-      log.success("Configuration saved");
-    } else {
-      log.info("No configuration found. Let's set things up.");
-      const config = await promptForConfig();
-      saveConfig(config);
-      log.success("Configuration saved");
-    }
-  }
-
-  const config = loadConfig();
-  const configSyncDays = args.days || config.sync_days || 730;
-
-  // Initialize database
   migrate();
 
-  // Authenticate with Strava (opens browser)
-  const tokens = await getValidTokens();
+  const syncDays = args.days || (configExists() ? loadConfig().sync_days : 730) || 730;
 
-  // Step 4: Fetch and store athlete profile
-  log.start("Fetching athlete profile...");
-  const athlete = await getAthlete(tokens);
-  insertAthlete(athlete);
-  log.success(`Athlete: ${athlete.firstname} ${athlete.lastname}`);
+  // Determine token directory
+  let tokenDir = args.tokenDir;
+  if (!tokenDir) {
+    if (configExists()) {
+      tokenDir = loadConfig().garmin_token_dir;
+    } else {
+      tokenDir = "/mnt/project";
+    }
+  }
 
-  // Step 5: Fetch activities
-  const afterDate = new Date();
-  afterDate.setDate(afterDate.getDate() - configSyncDays);
+  // Save config with resolved values for future runs
+  if (!configExists()) {
+    const config = createConfig(tokenDir, syncDays);
+    saveConfig(config);
+  }
 
-  const activities = await getAllActivities(tokens, afterDate);
+  const scriptPath = getSyncScriptPath();
 
-  // Step 6: Store activities
+  // Fetch and store athlete profile
+  log.start("Fetching athlete profile from Garmin Connect...");
+  const profileJson = runPythonSync(scriptPath, tokenDir, syncDays, "profile");
+  const profile: GarminSocialProfile = JSON.parse(profileJson);
+  insertAthlete(profile);
+  const displayName = profile.fullName ?? profile.displayName;
+  log.success(`Athlete: ${displayName}`);
+
+  // Fetch activities
+  log.start(`Fetching activities since ${syncDays} days ago...`);
+  const activitiesJson = runPythonSync(scriptPath, tokenDir, syncDays, "activities");
+  const activities: GarminActivity[] = JSON.parse(activitiesJson);
+  log.success(`Fetched ${activities.length} activities total`);
+
+  // Store activities
   log.start("Storing activities in database...");
   let count = 0;
   for (const activity of activities) {
@@ -500,14 +333,13 @@ async function runSync(args: SyncArgs): Promise<void> {
   log.progressEnd();
   log.success(`Stored ${activities.length} activities`);
 
-  // Step 7: Log sync
   execute(`
     INSERT INTO sync_log (started_at, completed_at, activities_synced, status)
     VALUES (datetime('now'), datetime('now'), ${activities.length}, 'success');
   `);
 
   log.info(`Database: ${getDbPath()}`);
-  log.ready(`Query with: sqlite3 -json "${getDbPath()}" "SELECT * FROM weekly_volume"`);
+  log.ready("Sync complete! You can now create training plans.");
 }
 
 // ============================================================================
@@ -515,7 +347,6 @@ async function runSync(args: SyncArgs): Promise<void> {
 // ============================================================================
 
 function getTemplatePath(): string {
-  // Look for template in multiple locations
   const locations = [
     join(__dirname, "..", "templates", "plan-viewer.html"),
     join(__dirname, "..", "..", "templates", "plan-viewer.html"),
@@ -537,38 +368,32 @@ function getTemplatePath(): string {
 function runRender(args: RenderArgs): void {
   log.start("Rendering training plan...");
 
-  // Read the plan JSON
   let planJson: string;
   try {
     planJson = readFileSync(args.inputFile, "utf-8");
-  } catch (err) {
+  } catch {
     log.error(`Could not read input file: ${args.inputFile}`);
     process.exit(1);
   }
 
-  // Validate it's valid JSON
   try {
     JSON.parse(planJson);
-  } catch (err) {
+  } catch {
     log.error("Input file is not valid JSON");
     process.exit(1);
   }
 
-  // Read the template
   const templatePath = getTemplatePath();
   let template = readFileSync(templatePath, "utf-8");
 
-  // Replace the plan data in the template
   const planDataRegex = /<script type="application\/json" id="plan-data">[\s\S]*?<\/script>/;
   const newPlanData = `<script type="application/json" id="plan-data">\n${planJson}\n</script>`;
   template = template.replace(planDataRegex, newPlanData);
 
-  // Output
   if (args.outputFile) {
     writeFileSync(args.outputFile, template);
     log.success(`Training plan rendered to: ${args.outputFile}`);
   } else {
-    // Output to stdout
     console.log(template);
   }
 }
@@ -599,9 +424,6 @@ async function main() {
   switch (args.command) {
     case "help":
       printHelp();
-      break;
-    case "auth":
-      await runAuth(args);
       break;
     case "sync":
       await runSync(args);

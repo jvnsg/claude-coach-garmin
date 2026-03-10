@@ -1,8 +1,8 @@
 -- Core activity data
 CREATE TABLE IF NOT EXISTS activities (
-  id INTEGER PRIMARY KEY,           -- Strava activity ID
+  id INTEGER PRIMARY KEY,           -- Garmin activity ID
   name TEXT,
-  sport_type TEXT,                  -- Run, Ride, Swim, etc.
+  sport_type TEXT,                  -- running, cycling, swimming, etc.
   start_date TEXT,                  -- ISO 8601 UTC
   elapsed_time INTEGER,             -- seconds
   moving_time INTEGER,              -- seconds
@@ -16,13 +16,13 @@ CREATE TABLE IF NOT EXISTS activities (
   max_watts REAL,
   weighted_average_watts REAL,      -- normalized power
   kilojoules REAL,
-  suffer_score INTEGER,             -- Strava's relative effort
+  suffer_score INTEGER,             -- relative effort (reserved)
   average_cadence REAL,
   calories REAL,
   description TEXT,
-  workout_type INTEGER,             -- 0=default, 1=race, 2=workout, 3=long run
+  workout_type INTEGER,             -- reserved
   gear_id TEXT,
-  raw_json TEXT,                    -- full Strava response as JSON
+  raw_json TEXT,                    -- full Garmin Connect response as JSON
   synced_at TEXT DEFAULT (datetime('now'))
 );
 

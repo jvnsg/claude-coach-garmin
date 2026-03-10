@@ -157,7 +157,7 @@ SELECT
   END AS day_name,
   COUNT(*) AS long_rides
 FROM activities
-WHERE sport_type = 'Ride'
+WHERE sport_type LIKE '%cycling%' OR sport_type LIKE '%biking%' OR sport_type LIKE '%ride%'
   AND moving_time > 5400
 GROUP BY strftime('%w', start_date)
 ORDER BY long_rides DESC;
@@ -175,7 +175,7 @@ SELECT
   END AS day_name,
   COUNT(*) AS long_runs
 FROM activities
-WHERE sport_type IN ('Run', 'Trail Run')
+WHERE sport_type LIKE '%running%'
   AND moving_time > 3600
 GROUP BY strftime('%w', start_date)
 ORDER BY long_runs DESC;
@@ -193,7 +193,7 @@ SELECT
   END AS day_name,
   COUNT(*) AS swim_sessions
 FROM activities
-WHERE sport_type = 'Swim'
+WHERE sport_type LIKE '%swimming%'
 GROUP BY strftime('%w', start_date)
 ORDER BY swim_sessions DESC;
 ```
