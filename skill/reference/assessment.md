@@ -85,7 +85,7 @@ _"The athlete's swim data shows 5000m sessions at avg HR 125 with suffer_score o
 
 ### Inferring Long Session Preferences
 
-Before asking, analyze their Strava data to identify patterns:
+Before asking, analyze their Garmin data to identify patterns:
 
 ```sql
 -- Find preferred days for long rides (>90 min)
@@ -93,7 +93,7 @@ SELECT
   strftime('%w', start_date) as day_of_week,
   COUNT(*) as count
 FROM activities
-WHERE sport_type = 'Ride'
+WHERE (sport_type LIKE '%cycling%' OR sport_type LIKE '%biking%' OR sport_type LIKE '%ride%')
   AND moving_time > 5400
 GROUP BY day_of_week
 ORDER BY count DESC;
@@ -103,7 +103,7 @@ SELECT
   strftime('%w', start_date) as day_of_week,
   COUNT(*) as count
 FROM activities
-WHERE sport_type IN ('Run', 'Trail Run')
+WHERE sport_type LIKE '%running%'
   AND moving_time > 3600
 GROUP BY day_of_week
 ORDER BY count DESC;
@@ -116,7 +116,7 @@ Use this data to make an informed suggestion: _"I notice you typically do your l
 ### Example Dialogue
 
 ```
-Based on your Strava data, here's my initial assessment:
+Based on your Garmin data, here's my initial assessment:
 
 **Strengths:**
 - Swimming: Your 5000m sessions at HR 125 suggest excellent swim fitness.
