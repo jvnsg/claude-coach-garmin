@@ -404,6 +404,7 @@ function runRender(args: RenderArgs): void {
 
 async function runQuery(args: QueryArgs): Promise<void> {
   await initDatabase();
+  migrate();
 
   if (args.json) {
     const results = queryJson(args.sql);

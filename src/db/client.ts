@@ -1,5 +1,5 @@
 import { execSync, spawnSync } from "child_process";
-import { getDbPath } from "../lib/config.js";
+import { ensureConfigDir, getDbPath } from "../lib/config.js";
 
 // ============================================================================
 // SQLite Backend Abstraction
@@ -18,6 +18,8 @@ let cachedBackend: SqliteBackend | null = null;
  * Falls back to shelling out to sqlite3 CLI if not available.
  */
 async function detectBackend(): Promise<SqliteBackend> {
+  ensureConfigDir();
+
   // Try Node.js built-in SQLite first (Node 22.5+)
   try {
     // Dynamic import to avoid syntax errors on older Node versions
