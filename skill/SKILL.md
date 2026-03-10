@@ -1,6 +1,6 @@
 ---
 name: coach
-description: Create personalized triathlon, marathon, and ultra-endurance training plans. Use when athletes ask for training plans, workout schedules, race preparation, or coaching advice. Can sync with Strava to analyze training history, or work from manually provided fitness data. Generates periodized plans with sport-specific workouts, zones, and race-day strategies.
+description: Create personalized triathlon, marathon, and ultra-endurance training plans. Use when athletes ask for training plans, workout schedules, race preparation, or coaching advice. Can sync with Garmin Connect to analyze training history, or work from manually provided fitness data. Generates periodized plans with sport-specific workouts, zones, and race-day strategies.
 ---
 
 # Claude Coach: Endurance Training Plan Skill
@@ -11,9 +11,9 @@ You are an expert endurance coach specializing in triathlon, marathon, and ultra
 
 Before creating a training plan, you need to understand the athlete's current fitness. There are two ways to gather this information:
 
-### Step 1: Check for Existing Strava Data
+### Step 1: Check for Existing Garmin Data
 
-First, check if the user has already synced their Strava data:
+First, check if the user has already synced their Garmin Connect data:
 
 ```bash
 ls ~/.claude-coach/coach.db
@@ -30,17 +30,19 @@ questions:
   - question: "How would you like to provide your training data?"
     header: "Data Source"
     options:
-      - label: "Connect to Strava (Recommended)"
-        description: "Copy tokens from strava.com/settings/api - I'll analyze your training history"
+      - label: "Sync from Garmin Connect (Recommended)"
+        description: "Uses your Garmin Connect account - I'll analyze your training history"
       - label: "Enter manually"
-        description: "Tell me about your fitness - no Strava account needed"
+        description: "Tell me about your fitness - no Garmin account needed"
 ```
 
 ---
 
-## Option A: Strava Integration
+## Option A: Garmin Connect Integration
 
-If they choose Strava, first check if database already exists:
+The Garmin Connect integration uses garth OAuth tokens stored in the project files. The tokens are pre-configured — no browser login needed.
+
+First check if database already exists:
 
 ```bash
 ls ~/.claude-coach/coach.db
@@ -48,83 +50,21 @@ ls ~/.claude-coach/coach.db
 
 **If the database exists:** Skip to "Database Access" to query their training history.
 
-**If no database exists:** Guide the user through Strava authorization.
+**If no database exists:** Run the sync command directly:
 
-### Step 1: Get Strava API Credentials
-
-Use **AskUserQuestion** to get credentials:
-
-```
-questions:
-  - question: "Go to strava.com/settings/api - what is your Client ID?"
-    header: "Client ID"
-    options:
-      - label: "I have my Client ID"
-        description: "Enter the numeric Client ID via 'Other'"
-      - label: "I need to create an app first"
-        description: "Click 'Create an app', set callback domain to 'localhost'"
-```
-
-Then ask for the secret:
-
-```
-questions:
-  - question: "Now enter your Client Secret from the same page"
-    header: "Client Secret"
-    options:
-      - label: "I have my Client Secret"
-        description: "Enter the secret via 'Other'"
-```
-
-### Step 2: Generate Authorization URL
-
-Run the auth command to generate the OAuth URL:
+### Sync Garmin Connect Data
 
 ```bash
-npx claude-coach auth --client-id=CLIENT_ID --client-secret=CLIENT_SECRET
-```
-
-This outputs an authorization URL. **Show this URL to the user** and tell them:
-
-1. Open the URL in a browser
-2. Click "Authorize" on Strava
-3. You'll be redirected to a page that won't load (that's expected!)
-4. Copy the **entire URL** from the browser's address bar and paste it back here
-
-### Step 3: Get the Redirect URL
-
-Use **AskUserQuestion** to get the URL:
-
-```
-questions:
-  - question: "Paste the entire URL from your browser's address bar"
-    header: "Redirect URL"
-    options:
-      - label: "I have the URL"
-        description: "Paste the full URL (starts with http://localhost...) via 'Other'"
-```
-
-### Step 4: Exchange Code and Sync
-
-Run these commands to complete authentication and sync (the CLI extracts the code from the URL automatically):
-
-```bash
-npx claude-coach auth --code="FULL_REDIRECT_URL"
 npx claude-coach sync --days=730
 ```
 
 This will:
 
-1. Exchange the code for access tokens
-2. Fetch 2 years of activity history
+1. Read the garth OAuth tokens from `/mnt/project/oauth1_token.json` and `/mnt/project/oauth2_token.json`
+2. Fetch up to 2 years of activity history from Garmin Connect
 3. Store everything in `~/.claude-coach/coach.db`
 
-### SQLite Requirements
-
-The sync command stores data in a SQLite database. The tool automatically uses the best available option:
-
-1. **Node.js 22.5+**: Uses the built-in `node:sqlite` module (no extra installation needed)
-2. **Older Node versions**: Falls back to the `sqlite3` CLI tool
+**Requirements:** Python 3 with garth installed (`pip install garth`)
 
 ### Refreshing Data
 
@@ -134,7 +74,12 @@ To get latest activities before creating a new plan:
 npx claude-coach sync
 ```
 
-This uses cached tokens and only fetches new activities.
+### SQLite Requirements
+
+The sync command stores data in a SQLite database. The tool automatically uses the best available option:
+
+1. **Node.js 22.5+**: Uses the built-in `node:sqlite` module (no extra installation needed)
+2. **Older Node versions**: Falls back to the `sqlite3` CLI tool
 
 ---
 
@@ -171,7 +116,7 @@ If they choose manual entry, gather the following through conversation. Ask natu
 
 ### Creating a Manual Assessment
 
-When working from manual data, create an assessment object with the same structure as you would from Strava data:
+When working from manual data, create an assessment object with the same structure as you would from Garmin data:
 
 ```json
 {
@@ -241,13 +186,13 @@ Read these files as needed during plan creation:
 
 ### Phase 0: Setup
 
-1. Ask how athlete wants to provide data (Strava or manual)
-2. **If Strava:** Check for existing database, gather credentials if needed, run sync
+1. Ask how athlete wants to provide data (Garmin Connect or manual)
+2. **If Garmin Connect:** Check for existing database, run sync if needed
 3. **If Manual:** Gather fitness information through conversation
 
 ### Phase 1: Data Gathering
 
-**If using Strava:**
+**If using Garmin Connect:**
 
 1. Read `skill/reference/queries.md` and run the assessment queries
 2. Read `skill/reference/assessment.md` to interpret the results
@@ -296,14 +241,14 @@ The JSON must follow the TrainingPlan schema.
 
 **Inferring Unit Preferences:**
 
-Determine the athlete's preferred units from their Strava data and event location:
+Determine the athlete's preferred units from their Garmin data and event location:
 
 | Indicator                                          | Likely Preference                            |
 | -------------------------------------------------- | -------------------------------------------- |
 | US-based events (Ironman Arizona, Boston Marathon) | Imperial: miles for bike/run, yards for swim |
 | European/Australian events                         | Metric: km for bike/run, meters for swim     |
-| Strava activities show distances in miles          | Imperial                                     |
-| Strava activities show distances in km             | Metric                                       |
+| Garmin activities show distances in miles          | Imperial                                     |
+| Garmin activities show distances in km             | Metric                                       |
 | Pool workouts in 25yd/50yd pools                   | Yards for swim                               |
 | Pool workouts in 25m/50m pools                     | Meters for swim                              |
 
@@ -542,5 +487,5 @@ After both files are created, tell the user:
 - **Zones must be established** before prescribing specific workouts
 - **Output JSON, then render HTML** - Write the plan as `.json`, then use `npx claude-coach render` to create the HTML viewer
 - **Explain the "why"** - Athletes trust and follow plans they understand
-- **Be conservative with manual data** - When working without Strava, err on the side of caution with volume and intensity
+- **Be conservative with manual data** - When working without Garmin Connect data, err on the side of caution with volume and intensity
 - **Recommend field tests** - For manual data athletes, include zone validation workouts in the first 1-2 weeks
